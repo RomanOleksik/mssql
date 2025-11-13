@@ -1,0 +1,62 @@
+# --- 1. Securitz Configuration ---
+# Forcing of TLS 1.2 usage
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+# 
+
+# --- 2. SQL Database Configuration ---
+
+# --- 2.1 API configuration
+$uri = ""
+$Username = ""       # Your API username
+$Password = ""    # Your API password
+
+# --- 2.2 Repository database configuraiton 
+$SQLServerInstance = "" 
+$Database = ""
+$ViewName = ""
+
+# --- 3. Setup Authentication Header (Run once) ---
+# Creates the Basic Auth header for the API
+Write-Host "Setting up API credentials..."
+$base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $Username, $Password)))
+$headers = @{Authorization=("Basic {0}" -f $base64AuthInfo)}
+
+# --- 4. Retrieve Data from SQL View ---
+try {
+    Write-Host "Fetching records from SQL view: $ViewName..." -ForegroundColor Cyan
+    # Note: Removed -TrustServerCertificate as it's not supported by old Powershell module
+    $recordsToProcess = Invoke-Sqlcmd -ServerInstance $SQLServerInstance -Database $Database -Query "SELECT * FROM $ViewName" -ErrorAction Stop
+    Write-Host "Found $($recordsToProcess.Count) records to process." -ForegroundColor Green
+}
+catch {
+    Write-Error "Failed to retrieve data from SQL Server. Details: $_"
+    return # Stop script if we can't get data
+}
+
+# --- 5. Process and Send Each Record ---
+foreach ($row in $recordsToProcess) {
+    try {
+        # Identify the record for logging (change 'ServerName' if your key column is different)
+        $identifier = $row.ServerName
+
+        # --- CONVERT ROW TO JSON ---
+        # Exclude internal .NET properties to ensure a clean payload
+        $jsonPayload = $row | Select-Object * -ExcludeProperty ItemArray, Table, RowError, RowState, HasErrors | ConvertTo-Json -Depth 10 -Compress
+        
+        Write-Host "Sending record for: $identifier ..." -ForegroundColor Yellow
+        # Write-Output $jsonPayload # <-- Uncomment this line if you want to see the JSON before sending
+
+        # --- EXECUTE THE POST REQUEST ---
+        $response = Invoke-RestMethod -Uri $uri -Method Post -Body $jsonPayload -Headers $headers -ContentType "application/json" -ErrorAction Stop
+        
+        Write-Host "SUCCESS: $identifier processed." -ForegroundColor Green
+        # Write-Host "Response: $response" # <-- Uncomment to see the server's reply
+    }
+    catch {
+        # This catches errors for a single record, allowing the loop to continue
+        Write-Error "FAILED to send record $identifier. Details: $($_.Exception.Message)"
+    }
+}
+
+Write-Host "--------------------------------------------------" -ForegroundColor Gray
+Write-Host "Script complete. All records processed." -ForegroundColor Green
